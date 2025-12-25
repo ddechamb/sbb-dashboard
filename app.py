@@ -6,7 +6,7 @@ import datetime
 # ================= CONFIGURATION =================
 # If your parquet file is < 100MB, keep it in the repo.
 # If larger, you might need to host it elsewhere (S3) or use Git LFS.
-DATA_PATH = 'sbb_enriched.parquet' 
+DATA_PATH = 'sbb_master_data.parquet'
 
 # KNOWN CONSTRUCTION DAYS (The "Blacklist")
 # Dates where the system was structurally broken (Planned Works)
