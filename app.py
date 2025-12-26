@@ -4,7 +4,7 @@ import plotly.express as px
 import datetime
 
 # ================= CONFIGURATION =================
-# URL to your Parquet file on Hugging Face
+# URL to your Parquet file on Hugging Face (Resolve URL)
 DATA_URL = "https://huggingface.co/datasets/ddechamb/sbb-2025-data/resolve/main/sbb_master_data.parquet"
 
 # KNOWN CONSTRUCTION DAYS (The "Blacklist")
@@ -24,22 +24,29 @@ st.set_page_config(page_title="SBB 2025 Intelligence", page_icon="🚄", layout=
 @st.cache_resource
 def get_lazy_frame():
     """
-    Connects to the parquet file without downloading it.
-    Uses st.secrets['HF_TOKEN'] to authenticate and avoid Rate Limits.
+    Connects to Hugging Face using explicit HTTP Headers for Authentication.
+    This fixes the '429 Too Many Requests' error.
     """
     try:
-        # Check if token exists in secrets
+        # Check for secret
         if "HF_TOKEN" in st.secrets:
-            storage_options = {"token": st.secrets["HF_TOKEN"]}
+            # FORCE the Authorization header. 
+            # This is the standard way to authenticate via HTTP.
+            storage_options = {
+                "headers": {"Authorization": f"Bearer {st.secrets['HF_TOKEN']}"}
+            }
         else:
-            st.warning("⚠️ No HF_TOKEN found in secrets. You might hit rate limits.")
-            storage_options = None
-            
+            st.warning("⚠️ No HF_TOKEN found in Streamlit Secrets. You may hit rate limits.")
+            storage_options = {}
+
+        # Scan with explicit headers
         return pl.scan_parquet(DATA_URL, storage_options=storage_options)
+        
     except Exception as e:
         st.error(f"Failed to connect to data: {e}")
         return None
 
+# Initialize connection
 lf = get_lazy_frame()
 
 if lf is None:
@@ -49,7 +56,7 @@ if lf is None:
 st.sidebar.title("🚄 SBB Explorer")
 
 # --- FILTER 1: LINES ---
-# Pre-defined list to avoid scanning 5GB file for unique values
+# Hardcoded common lines to avoid scanning the 5GB file for unique values
 common_lines = ["IC 1", "IC 5", "IC 3", "IC 6", "IC 8", "IC 61", "IR 15", "IR 90", "EC", "IC 2"]
 selected_lines = st.sidebar.multiselect("Select Lines", common_lines, default=["IC 1", "IC 5"])
 
@@ -77,10 +84,11 @@ with st.spinner(f"Downloading data for {', '.join(selected_lines)}..."):
         df = query.collect()
     except Exception as e:
         st.error(f"Error streaming data: {e}")
-        st.error("Did you add your HF_TOKEN to Streamlit Secrets?")
+        st.error("Check your HF_TOKEN in Streamlit Secrets.")
         st.stop()
 
 # 3. Post-Processing (In Memory)
+# Add failure logic, fix dates, extract hour/month
 df = df.with_columns([
     pl.col("BETRIEBSTAG").cast(pl.Date),
     ((pl.col("IS_CANCELLED")) | (pl.col("DELAY_MIN") >= 10)).alias("IS_FAILURE"),
