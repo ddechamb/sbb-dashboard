@@ -2,6 +2,7 @@ import streamlit as st
 import polars as pl
 import plotly.express as px
 import datetime
+import os
 from huggingface_hub import hf_hub_download
 
 # ================= CONFIGURATION =================
@@ -20,20 +21,20 @@ CONSTRUCTION_DAYS = [
 
 st.set_page_config(page_title="SBB 2025 Intelligence", page_icon="🚄", layout="wide")
 
-# ================= CACHED DATA DOWNLOADER =================
+# ================= 1. ROBUST DATA DOWNLOADER =================
 @st.cache_resource
-def download_data():
+def get_local_filepath():
     """
-    Downloads the 5GB file to the local Streamlit disk cache.
-    This avoids the '429 Too Many Requests' error by making 1 request instead of 5000.
+    Downloads the file ONCE to the server's local disk.
+    This fixes the '429 Rate Limit' error by stopping constant network requests.
     """
     try:
-        # Get token from secrets
         token = st.secrets.get("HF_TOKEN", None)
         if not token:
-            st.warning("⚠️ No HF_TOKEN found. Download might fail if repo is private/gated.")
-
-        with st.spinner("Downloading dataset to local cache (this happens once)..."):
+            st.warning("⚠️ HF_TOKEN not found. Download might fail if repo is private.")
+            
+        with st.spinner("📦 Downloading dataset to local disk (One-time setup)..."):
+            # This function automatically caches the file. It won't re-download if it exists.
             local_path = hf_hub_download(
                 repo_id=REPO_ID,
                 filename=FILENAME,
@@ -42,26 +43,52 @@ def download_data():
             )
         return local_path
     except Exception as e:
-        st.error(f"Download failed: {e}")
+        st.error(f"❌ Download failed: {e}")
         return None
 
-# 1. Download/Locate the file
-file_path = download_data()
+# Execution: Get the file path
+file_path = get_local_filepath()
 if not file_path:
     st.stop()
 
-# 2. Connect LazyFrame to local file (Zero RAM usage so far)
+# Connect Polars to the LOCAL file (Fast & No Network Limits)
 lf = pl.scan_parquet(file_path)
 
-# ================= SIDEBAR =================
+# ================= 2. AUTO-DETECT LINES (Fixes '0 Journeys') =================
 st.sidebar.title("🚄 SBB Explorer")
 
+@st.cache_data
+def get_available_lines():
+    """Scans the file to find the ACTUAL line names (e.g. 'IC1' vs 'IC 1')"""
+    # We scan the first 1 million rows to get a representative list of lines
+    return (
+        lf.select("LINIEN_TEXT")
+        .unique()
+        .collect()
+        .get_column("LINIEN_TEXT")
+        .sort()
+        .to_list()
+    )
+
+with st.spinner("🔍 Scanning for available train lines..."):
+    try:
+        all_lines = get_available_lines()
+        # Default to the first two lines found (usually IC1, IC5)
+        default_lines = all_lines[:2] if len(all_lines) >= 2 else all_lines
+    except Exception as e:
+        st.error(f"Could not read lines: {e}")
+        st.stop()
+
 # --- FILTER 1: LINES ---
-common_lines = ["IC 1", "IC 5", "IC 3", "IC 6", "IC 8", "IC 61", "IR 15", "IR 90", "EC", "IC 2"]
-selected_lines = st.sidebar.multiselect("Select Lines", common_lines, default=["IC 1", "IC 5"])
+st.sidebar.subheader("Select Lines")
+selected_lines = st.sidebar.multiselect(
+    "Choose lines to analyze:", 
+    options=all_lines, 
+    default=default_lines
+)
 
 if not selected_lines:
-    st.warning("Please select at least one line.")
+    st.warning("👈 Please select at least one line from the sidebar.")
     st.stop()
 
 # --- FILTER 2: NEUTRALIZATION ---
@@ -73,19 +100,19 @@ neutralize = st.sidebar.checkbox(
     help="Exclude known 'Total Closure' days and weekends."
 )
 
-# ================= DATA PROCESSING =================
-# 3. Build Query
+# ================= 3. DATA PROCESSING =================
+# Build Query
 query = lf.filter(pl.col("LINIEN_TEXT").is_in(selected_lines))
 
-# 4. Load into RAM
-with st.spinner(f"Processing data for {', '.join(selected_lines)}..."):
+# Load into RAM
+with st.spinner(f"🚀 Processing data for {', '.join(selected_lines)}..."):
     try:
         df = query.collect()
     except Exception as e:
         st.error(f"Error processing data: {e}")
         st.stop()
 
-# 5. Post-Processing
+# Post-Processing
 df = df.with_columns([
     pl.col("BETRIEBSTAG").cast(pl.Date),
     ((pl.col("IS_CANCELLED")) | (pl.col("DELAY_MIN") >= 10)).alias("IS_FAILURE"),
@@ -93,7 +120,7 @@ df = df.with_columns([
     df["BETRIEBSTAG"].dt.month().alias("MONTH")
 ])
 
-# 6. Apply Neutralization
+# Apply Neutralization
 if neutralize:
     df = df.filter(
         (~pl.col("BETRIEBSTAG").is_in(CONSTRUCTION_DAYS)) &
@@ -101,7 +128,7 @@ if neutralize:
     )
     st.sidebar.success(f"✅ Data Neutralized")
 
-# ================= MAIN DASHBOARD =================
+# ================= 4. DASHBOARD =================
 st.title("🇨🇭 SBB 2025: System Performance")
 st.markdown(f"Analysis of **{df.height:,}** journeys on **{', '.join(selected_lines)}**")
 
