@@ -2,11 +2,11 @@ import streamlit as st
 import polars as pl
 import plotly.express as px
 import datetime
-import os
+from huggingface_hub import hf_hub_download
 
 # ================= CONFIGURATION =================
-# MAGIC URL: Use 'hf://' scheme. Polars + huggingface_hub handles the rest.
-DATA_URL = "hf://datasets/ddechamb/sbb-2025-data/sbb_master_data.parquet"
+REPO_ID = "ddechamb/sbb-2025-data"
+FILENAME = "sbb_master_data.parquet"
 
 # KNOWN CONSTRUCTION DAYS (The "Blacklist")
 CONSTRUCTION_DAYS = [
@@ -20,29 +20,38 @@ CONSTRUCTION_DAYS = [
 
 st.set_page_config(page_title="SBB 2025 Intelligence", page_icon="🚄", layout="wide")
 
-# ================= LAZY DATA LOADER =================
+# ================= CACHED DATA DOWNLOADER =================
 @st.cache_resource
-def get_lazy_frame():
+def download_data():
     """
-    Connects to Hugging Face using the 'hf://' scheme.
-    Requires 'huggingface_hub' in requirements.txt.
-    Automatically uses HF_TOKEN from secrets or env vars.
+    Downloads the 5GB file to the local Streamlit disk cache.
+    This avoids the '429 Too Many Requests' error by making 1 request instead of 5000.
     """
-    # 1. Inject Token into Environment (Polars reads this automatically)
-    if "HF_TOKEN" in st.secrets:
-        os.environ["HF_TOKEN"] = st.secrets["HF_TOKEN"]
-    else:
-        st.warning("⚠️ No HF_TOKEN found. You are anonymous (rate limits apply).")
-    
-    # 2. Scan directly
-    return pl.scan_parquet(DATA_URL)
+    try:
+        # Get token from secrets
+        token = st.secrets.get("HF_TOKEN", None)
+        if not token:
+            st.warning("⚠️ No HF_TOKEN found. Download might fail if repo is private/gated.")
 
-# Initialize connection
-try:
-    lf = get_lazy_frame()
-except Exception as e:
-    st.error(f"Crash during connection: {e}")
+        with st.spinner("Downloading dataset to local cache (this happens once)..."):
+            local_path = hf_hub_download(
+                repo_id=REPO_ID,
+                filename=FILENAME,
+                repo_type="dataset",
+                token=token
+            )
+        return local_path
+    except Exception as e:
+        st.error(f"Download failed: {e}")
+        return None
+
+# 1. Download/Locate the file
+file_path = download_data()
+if not file_path:
     st.stop()
+
+# 2. Connect LazyFrame to local file (Zero RAM usage so far)
+lf = pl.scan_parquet(file_path)
 
 # ================= SIDEBAR =================
 st.sidebar.title("🚄 SBB Explorer")
@@ -52,7 +61,7 @@ common_lines = ["IC 1", "IC 5", "IC 3", "IC 6", "IC 8", "IC 61", "IR 15", "IR 90
 selected_lines = st.sidebar.multiselect("Select Lines", common_lines, default=["IC 1", "IC 5"])
 
 if not selected_lines:
-    st.warning("Please select at least one line to load data.")
+    st.warning("Please select at least one line.")
     st.stop()
 
 # --- FILTER 2: NEUTRALIZATION ---
@@ -65,18 +74,18 @@ neutralize = st.sidebar.checkbox(
 )
 
 # ================= DATA PROCESSING =================
-# 1. Build the Query
+# 3. Build Query
 query = lf.filter(pl.col("LINIEN_TEXT").is_in(selected_lines))
 
-# 2. Collect into RAM
-with st.spinner(f"Streaming data for {', '.join(selected_lines)}..."):
+# 4. Load into RAM
+with st.spinner(f"Processing data for {', '.join(selected_lines)}..."):
     try:
         df = query.collect()
     except Exception as e:
-        st.error(f"Error reading data: {e}")
+        st.error(f"Error processing data: {e}")
         st.stop()
 
-# 3. Post-Processing
+# 5. Post-Processing
 df = df.with_columns([
     pl.col("BETRIEBSTAG").cast(pl.Date),
     ((pl.col("IS_CANCELLED")) | (pl.col("DELAY_MIN") >= 10)).alias("IS_FAILURE"),
@@ -84,7 +93,7 @@ df = df.with_columns([
     df["BETRIEBSTAG"].dt.month().alias("MONTH")
 ])
 
-# 4. Apply Neutralization
+# 6. Apply Neutralization
 if neutralize:
     df = df.filter(
         (~pl.col("BETRIEBSTAG").is_in(CONSTRUCTION_DAYS)) &
