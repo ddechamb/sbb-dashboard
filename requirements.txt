@@ -3,3 +3,4 @@ polars
 plotly
 pyarrow
 fsspec
+aiohttp
