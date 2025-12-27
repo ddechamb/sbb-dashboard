@@ -2,12 +2,11 @@ import streamlit as st
 import polars as pl
 import plotly.express as px
 import datetime
-import pyarrow.dataset as ds
-import fsspec
+import os
 
 # ================= CONFIGURATION =================
-# URL to your Parquet file on Hugging Face (Resolve URL)
-DATA_URL = "https://huggingface.co/datasets/ddechamb/sbb-2025-data/resolve/main/sbb_master_data.parquet"
+# MAGIC URL: Use 'hf://' scheme. Polars + huggingface_hub handles the rest.
+DATA_URL = "hf://datasets/ddechamb/sbb-2025-data/sbb_master_data.parquet"
 
 # KNOWN CONSTRUCTION DAYS (The "Blacklist")
 CONSTRUCTION_DAYS = [
@@ -21,42 +20,28 @@ CONSTRUCTION_DAYS = [
 
 st.set_page_config(page_title="SBB 2025 Intelligence", page_icon="🚄", layout="wide")
 
-# ================= LAZY DATA LOADER (PyArrow Method) =================
+# ================= LAZY DATA LOADER =================
 @st.cache_resource
 def get_lazy_frame():
     """
-    Connects to Hugging Face using PyArrow + FSSPEC.
-    This bypasses the Polars 'storage_options' error completely.
+    Connects to Hugging Face using the 'hf://' scheme.
+    Requires 'huggingface_hub' in requirements.txt.
+    Automatically uses HF_TOKEN from secrets or env vars.
     """
-    try:
-        # 1. Prepare Headers for Authentication
-        if "HF_TOKEN" in st.secrets:
-            # We use the standard Authorization header
-            headers = {"Authorization": f"Bearer {st.secrets['HF_TOKEN']}"}
-        else:
-            st.warning("⚠️ No HF_TOKEN found. Using anonymous access (limitations apply).")
-            headers = {}
-
-        # 2. Create a Virtual Filesystem connection via FSSPEC
-        # This handles the HTTP/Auth part robustly
-        fs = fsspec.filesystem("http", headers=headers)
-
-        # 3. Create a PyArrow Dataset
-        # This reads the metadata without downloading the file
-        dataset = ds.dataset(DATA_URL, filesystem=fs, format="parquet")
-
-        # 4. Hand off to Polars
-        # Polars trusts the PyArrow dataset and doesn't need to do its own auth
-        return pl.scan_pyarrow_dataset(dataset)
-
-    except Exception as e:
-        st.error(f"Failed to connect to data: {e}")
-        return None
+    # 1. Inject Token into Environment (Polars reads this automatically)
+    if "HF_TOKEN" in st.secrets:
+        os.environ["HF_TOKEN"] = st.secrets["HF_TOKEN"]
+    else:
+        st.warning("⚠️ No HF_TOKEN found. You are anonymous (rate limits apply).")
+    
+    # 2. Scan directly
+    return pl.scan_parquet(DATA_URL)
 
 # Initialize connection
-lf = get_lazy_frame()
-
-if lf is None:
+try:
+    lf = get_lazy_frame()
+except Exception as e:
+    st.error(f"Crash during connection: {e}")
     st.stop()
 
 # ================= SIDEBAR =================
@@ -84,13 +69,11 @@ neutralize = st.sidebar.checkbox(
 query = lf.filter(pl.col("LINIEN_TEXT").is_in(selected_lines))
 
 # 2. Collect into RAM
-with st.spinner(f"Downloading data for {', '.join(selected_lines)}..."):
+with st.spinner(f"Streaming data for {', '.join(selected_lines)}..."):
     try:
-        # PyArrow handles the streaming download here
         df = query.collect()
     except Exception as e:
-        st.error(f"Error streaming data: {e}")
-        st.error("Check your HF_TOKEN in Streamlit Secrets.")
+        st.error(f"Error reading data: {e}")
         st.stop()
 
 # 3. Post-Processing
