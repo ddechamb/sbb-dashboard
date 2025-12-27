@@ -26,23 +26,27 @@ st.set_page_config(page_title="SBB 2025 Intelligence", page_icon="🚄", layout=
 def get_lazy_frame():
     """
     Connects to Hugging Face using PyArrow + FSSPEC.
-    This is the most robust way to handle authentication without crashing Polars.
+    This bypasses the Polars 'storage_options' error completely.
     """
     try:
-        # 1. Prepare Authentication Headers
+        # 1. Prepare Headers for Authentication
         if "HF_TOKEN" in st.secrets:
+            # We use the standard Authorization header
             headers = {"Authorization": f"Bearer {st.secrets['HF_TOKEN']}"}
         else:
-            st.warning("⚠️ No HF_TOKEN found. Using anonymous access (might fail).")
+            st.warning("⚠️ No HF_TOKEN found. Using anonymous access (limitations apply).")
             headers = {}
 
-        # 2. Create a virtual filesystem connection
+        # 2. Create a Virtual Filesystem connection via FSSPEC
+        # This handles the HTTP/Auth part robustly
         fs = fsspec.filesystem("http", headers=headers)
 
-        # 3. Create a PyArrow Dataset (Lazy)
+        # 3. Create a PyArrow Dataset
+        # This reads the metadata without downloading the file
         dataset = ds.dataset(DATA_URL, filesystem=fs, format="parquet")
 
-        # 4. Convert to Polars LazyFrame
+        # 4. Hand off to Polars
+        # Polars trusts the PyArrow dataset and doesn't need to do its own auth
         return pl.scan_pyarrow_dataset(dataset)
 
     except Exception as e:
@@ -82,6 +86,7 @@ query = lf.filter(pl.col("LINIEN_TEXT").is_in(selected_lines))
 # 2. Collect into RAM
 with st.spinner(f"Downloading data for {', '.join(selected_lines)}..."):
     try:
+        # PyArrow handles the streaming download here
         df = query.collect()
     except Exception as e:
         st.error(f"Error streaming data: {e}")
@@ -139,7 +144,6 @@ with tab1:
 
 with tab2:
     st.subheader("The 'Red Streak' (Time vs. Reliability)")
-    st.markdown("Darker Red = Higher probability of failure at this hour.")
     
     heatmap_data = (
         df.group_by("HOUR")
